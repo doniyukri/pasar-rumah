@@ -6,16 +6,18 @@ import {
   uploadBytesResumable,
   getDownloadURL,
 } from "firebase/storage";
-import { addDoc, collection, serverTimestamp } from "firebase/firestore";
+import { doc, updateDoc, getDoc, serverTimestamp } from "firebase/firestore";
 import { db } from "../firebase.config";
-import { useNavigate } from "react-router-dom";
-import Spinner from "../components/Spinner";
+import { useNavigate, useParams } from "react-router-dom";
 import { toast } from "react-toastify";
 import { v4 as uuidv4 } from "uuid";
+import Spinner from "../components/Spinner";
 
-function CreateListing() {
+function EditListing() {
+  // eslint-disable-next-line
   const [geolocationEnabled, setGeolocationEnabled] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [listing, setListing] = useState(false);
   const [formData, setFormData] = useState({
     type: "rent",
     name: "",
@@ -27,7 +29,7 @@ function CreateListing() {
     offer: false,
     regularPrice: 0,
     discountedPrice: 0,
-    images: [],
+    images: {},
     latitude: 0,
     longitude: 0,
   });
@@ -50,8 +52,37 @@ function CreateListing() {
 
   const auth = getAuth();
   const navigate = useNavigate();
+  const params = useParams();
   const isMounted = useRef(true);
 
+  // Redirect if listing is not user's
+  useEffect(() => {
+    if (listing && listing.userRef !== auth.currentUser.uid) {
+      toast.error("Tidak dapat di-edit");
+      navigate("/");
+    }
+  });
+
+  // Fetch listing to edit
+  useEffect(() => {
+    setLoading(true);
+    const fetchListing = async () => {
+      const docRef = doc(db, "listings", params.listingId);
+      const docSnap = await getDoc(docRef);
+      if (docSnap.exists()) {
+        setListing(docSnap.data());
+        setFormData({ ...docSnap.data(), address: docSnap.data().location });
+        setLoading(false);
+      } else {
+        navigate("/");
+        toast.error("Rumah tidak ada");
+      }
+    };
+
+    fetchListing();
+  }, [params.listingId, navigate]);
+
+  // Sets userRef to logged in user
   useEffect(() => {
     if (isMounted) {
       onAuthStateChanged(auth, (user) => {
@@ -66,40 +97,8 @@ function CreateListing() {
     return () => {
       isMounted.current = false;
     };
-    //eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isMounted]);
-
-  if (loading) {
-    return <Spinner />;
-  }
-
-  const onMutate = (e) => {
-    let boolean = null;
-
-    if (e.target.value === "true") {
-      boolean = true;
-    }
-
-    if (e.target.value === "false") {
-      boolean = false;
-    }
-
-    //check file
-    if (e.target.files) {
-      setFormData((prevState) => ({
-        ...prevState,
-        images: e.target.files,
-      }));
-    }
-
-    //check text/boolean/numbers
-    if (!e.target.files) {
-      setFormData((prevState) => ({
-        ...prevState,
-        [e.target.id]: boolean ?? e.target.value,
-      }));
-    }
-  };
 
   const onSubmit = async (e) => {
     e.preventDefault();
@@ -108,25 +107,45 @@ function CreateListing() {
 
     if (discountedPrice >= regularPrice) {
       setLoading(false);
-      toast.error("Harga diskon harus lebih murah daripada harga normal");
+      toast.error("Harga diskon harus lebih rendah daripada harga normal");
       return;
     }
 
     if (images.length > 6) {
       setLoading(false);
       toast.error("Maksimal 6 gambar");
+      return;
     }
 
     let geolocation = {};
     let location;
 
-    if (!geolocationEnabled) {
+    if (geolocationEnabled) {
+      const response = await fetch(
+        `https://maps.googleapis.com/maps/api/geocode/json?address=${address}&key=${process.env.REACT_APP_GEOCODE_API_KEY}`
+      );
+
+      const data = await response.json();
+
+      geolocation.lat = data.results[0]?.geometry.location.lat ?? 0;
+      geolocation.lng = data.results[0]?.geometry.location.lng ?? 0;
+
+      location =
+        data.status === "ZERO_RESULTS"
+          ? undefined
+          : data.results[0]?.formatted_address;
+
+      if (location === undefined || location.includes("undefined")) {
+        setLoading(false);
+        toast.error("Alamat invalid");
+        return;
+      }
+    } else {
       geolocation.lat = latitude;
       geolocation.lng = longitude;
-      location = address;
     }
 
-    //store image
+    // Store image in firebase
     const storeImage = async (image) => {
       return new Promise((resolve, reject) => {
         const storage = getStorage();
@@ -171,7 +190,7 @@ function CreateListing() {
       [...images].map((image) => storeImage(image))
     ).catch(() => {
       setLoading(false);
-      toast.error("Images not uploaded");
+      toast.error("Gambar tidak ter-upload");
       return;
     });
 
@@ -182,23 +201,54 @@ function CreateListing() {
       timestamp: serverTimestamp(),
     };
 
+    formDataCopy.location = address;
     delete formDataCopy.images;
     delete formDataCopy.address;
     !formDataCopy.offer && delete formDataCopy.discountedPrice;
-    formDataCopy.location = location;
 
-    const docRef = await addDoc(collection(db, "listings"), formDataCopy);
-
+    // Update listing
+    const docRef = doc(db, "listings", params.listingId);
+    await updateDoc(docRef, formDataCopy);
     setLoading(false);
-
-    toast.success("Rumah berhasil didaftarkan");
+    toast.success("Berhasil");
     navigate(`/category/${formDataCopy.type}/${docRef.id}`);
   };
+
+  const onMutate = (e) => {
+    let boolean = null;
+
+    if (e.target.value === "true") {
+      boolean = true;
+    }
+    if (e.target.value === "false") {
+      boolean = false;
+    }
+
+    // Files
+    if (e.target.files) {
+      setFormData((prevState) => ({
+        ...prevState,
+        images: e.target.files,
+      }));
+    }
+
+    // Text/Booleans/Numbers
+    if (!e.target.files) {
+      setFormData((prevState) => ({
+        ...prevState,
+        [e.target.id]: boolean ?? e.target.value,
+      }));
+    }
+  };
+
+  if (loading) {
+    return <Spinner />;
+  }
 
   return (
     <div className="profile">
       <header>
-        <p className="pageHeader">Daftarkan rumah</p>
+        <p className="pageHeader">Edit Rumah</p>
       </header>
 
       <main>
@@ -266,7 +316,7 @@ function CreateListing() {
             </div>
           </div>
 
-          <label className="formLabel">Tempat parkir</label>
+          <label className="formLabel">Tempat Parkir</label>
           <div className="formButtons">
             <button
               className={parking ? "formButtonActive" : "formButton"}
@@ -329,8 +379,7 @@ function CreateListing() {
           />
 
           {!geolocationEnabled && (
-            <div>
-              {/* <div className="formLatLng flex"> */}
+            <>
               <div>
                 <label className="formLabel">Latitude</label>
                 <input
@@ -353,7 +402,7 @@ function CreateListing() {
                   required
                 />
               </div>
-            </div>
+            </>
           )}
 
           <label className="formLabel">Penawaran</label>
@@ -365,7 +414,7 @@ function CreateListing() {
               value={true}
               onClick={onMutate}
             >
-              Ya
+              Ada
             </button>
             <button
               className={
@@ -413,7 +462,7 @@ function CreateListing() {
 
           <label className="formLabel">Gambar</label>
           <p className="imagesInfo">
-            Gambar pertama akan menjadi cover (max 6).
+            Gambar pertama akan menjadi cover (maksimal 6).
           </p>
           <input
             className="formInputFile"
@@ -426,7 +475,7 @@ function CreateListing() {
             required
           />
           <button type="submit" className="primaryButton createListingButton">
-            Daftarkan Rumah
+            Edit Rumah
           </button>
         </form>
       </main>
@@ -434,4 +483,4 @@ function CreateListing() {
   );
 }
 
-export default CreateListing;
+export default EditListing;
