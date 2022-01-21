@@ -83,11 +83,11 @@ function SignIn() {
           </div>
         </form>
 
-        <OAuth />
-
         <Link to="/sign-up" className="registerLink">
           Create new account
         </Link>
+
+        <OAuth />
       </div>
     </>
   );
